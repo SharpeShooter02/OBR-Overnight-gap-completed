@@ -1,0 +1,409 @@
+"""
+runner/main.py — CLI entry point for the live ORB session runner.
+
+Usage:
+    python -m orb_live.runner.main --paper
+    python -m orb_live.runner.main --live
+    python -m orb_live.runner.main --dry-run
+    python -m orb_live.runner.main --paper --session-date 2026-01-07
+    python -m orb_live.runner.main --paper --recover
+
+Flags:
+    --paper          Use IB paper-trading account (default)
+    --live           Use IB live-trading account (requires confirmation)
+    --dry-run        Simulate fills locally; use real market data
+    --session-date   Override today's date (YYYY-MM-DD; for replay / testing)
+    --recover        Reconcile positions from broker before running
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Live ORB session runner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--paper",   action="store_true", default=True,
+                      help="Paper trading (default)")
+    mode.add_argument("--live",    action="store_true",
+                      help="Live trading (requires IB_LIVE=1 env var)")
+    mode.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="Simulate fills locally; use real market data")
+
+    p.add_argument("--session-date", metavar="YYYY-MM-DD",
+                   help="Override trading date (default: today ET)")
+    p.add_argument("--recover", action="store_true",
+                   help="Reconcile broker positions before running")
+    return p.parse_args()
+
+
+def _confirm_live() -> None:
+    import os
+    if os.environ.get("IB_LIVE") != "1":
+        print(
+            "ERROR: --live requires IB_LIVE=1 in environment.\n"
+            "Set this only after completing all paper-trading validation."
+        )
+        sys.exit(1)
+    answer = input("You are about to trade with REAL MONEY. Type 'yes' to confirm: ")
+    if answer.strip().lower() != "yes":
+        print("Aborted.")
+        sys.exit(0)
+
+
+def build_broker_from_env(paper: bool = True, logger=None):
+    """Build and connect an IBClient from environment variables."""
+    from orb_live.data.ib_client import build_client_from_env as build_ib
+    client = build_ib(paper=paper, logger=logger)
+    client.connect()
+    return client
+
+
+def _build_components(args: argparse.Namespace, _log=None):
+    """
+    Construct all session components from config + env.
+
+    Returns (runner, clock, health_server, session_date).
+    """
+    import orb_live  # noqa: F401 — path setup
+
+    from orb_live.config.live_config import load_live_config
+    from orb_live.core.state_store import StateStore
+    from orb_live.core.logger import get_logger
+    from orb_live.core.clock import MarketClock
+    from orb_live.data.bar_cache import BarCache
+    from orb_live.data.underlying_data import UnderlyingDataStore
+    from orb_live.execution.order_policy import MarketableLimitPolicy
+    from orb_live.execution.position_manager import LivePositionManager
+    from orb_live.execution.risk_gate import RiskGate
+    from orb_live.ops.health_check import HealthServer
+    from orb_live.signals.pre_market import PreMarketJob
+    from orb_live.runner.bar_router import BarRouter
+    from orb_live.runner.strategy_engine import StrategyEngine
+    from orb_live.runner.session_runner import SessionRunner
+
+    logger = _log or get_logger(__name__)
+
+    logger.info("loading_config")
+    cfg = load_live_config()
+    logger.info("config_loaded", n_symbols=len(cfg.symbols))
+
+    # Session date
+    if args.session_date:
+        session_date = datetime.strptime(args.session_date, "%Y-%m-%d").date()
+    else:
+        session_date = datetime.now(tz=ET).date()
+
+    # Broker client — constructor only; no API calls here
+    paper = not args.live
+    logger.info("constructing_broker", paper=paper)
+    real_client = build_broker_from_env(paper=paper, logger=logger)
+    logger.info("broker_constructed")
+
+    try:
+        account = real_client.get_account()
+        logger.info(
+            "broker_account_verified",
+            broker_type=type(real_client).__name__,
+            equity=account.get("equity"),
+            buying_power=account.get("buying_power"),
+        )
+    except Exception as exc:
+        logger.error(
+            "broker_account_check_failed",
+            broker_type=type(real_client).__name__,
+            error=str(exc),
+        )
+        raise
+
+    if args.dry_run:
+        from orb_live.runner.dry_run import DryRunBroker
+        logger.info("fetching_equity_for_dry_run")
+        starting_equity = float(real_client.get_account().get("equity", 100_000.0))
+        broker = DryRunBroker(real_client, starting_equity=starting_equity)
+        logger.info("dry_run_broker_ready", starting_equity=starting_equity)
+    else:
+        broker = real_client
+
+    # State store
+    logger.info("initialising_state_store", path=str(cfg.db_path))
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = StateStore(cfg.db_path)
+    logger.info("state_store_ready")
+
+    # Supporting components
+    bar_cache    = BarCache()
+    clock        = MarketClock(broker_client=real_client)
+    ul_store     = UnderlyingDataStore(cfg.data_dir, broker=real_client, logger_=logger)
+
+    # Execution layer
+    policy = MarketableLimitPolicy(broker, cfg, store)
+    gate   = RiskGate(cfg, store, broker, logger=logger)
+
+
+    mgr = LivePositionManager(
+        broker=broker,
+        policy=policy,
+        state_store=store,
+        risk_gate=gate,
+        config=cfg.strategy_config,
+        logger=logger,
+    )
+
+    # Runner components
+    bar_router   = BarRouter(broker, store, bar_cache, logger=logger)
+    pre_market   = PreMarketJob(cfg, store, broker, ul_store, logger=logger)
+    engine       = StrategyEngine(mgr, cfg, store, broker, logger=logger)
+
+    runner = SessionRunner(
+        config=cfg,
+        broker=broker,
+        state_store=store,
+        bar_cache=bar_cache,
+        bar_router=bar_router,
+        pre_market_job=pre_market,
+        strategy_engine=engine,
+        position_manager=mgr,
+        risk_gate=gate,
+        underlying_store=ul_store,
+        clock=clock,
+        logger=logger,
+    )
+
+    # Health server — daemon thread, non-blocking
+    health_server = HealthServer(
+        state_store=store,
+        broker=broker,
+        bar_router=bar_router,
+        clock=clock,
+        session_state_fn=runner.health_snapshot,
+        logger=logger,
+    )
+
+    logger.info("components_ready", session_date=str(session_date))
+    return runner, clock, health_server, session_date
+
+
+#: How often the pre-market wait reports itself, in seconds. The daemon sleeps
+#: in `_sleep_interval` chunks (60s) so shutdown stays responsive; logging every
+#: chunk produced one line a minute for as long as 60+ hours over a long
+#: weekend. Five minutes keeps the "still alive, still waiting" signal without
+#: the noise.
+SLEEP_LOG_EVERY_SECS: float = 300.0
+
+#: How often the idle daemon probes the broker. A plain sleep never pumps the
+#: IB loop, so without this a Gateway restart or IBKR outage overnight is only
+#: discovered at 08:30 (2026-09-09, 2026-09-15).
+BROKER_HEARTBEAT_SECS: float = 300.0
+
+#: Quiet window before pre-market: no broker probe starts this close to the
+#: open, because a failing reconnect blocks for minutes (2026-09-17).
+HEARTBEAT_QUIET_SECS: float = 180.0
+
+
+def _run_daemon(
+    runner,
+    clock,
+    recover: bool = False,
+    _sleep=None,
+    _shutdown=None,
+    _sleep_interval: float = 60.0,
+) -> None:
+    """
+    Daemon loop: sleep until 08:30 ET on the next market day, run a session,
+    then repeat until SIGTERM/SIGINT.
+
+    Parameters prefixed with _ are injection points for testing only.
+    """
+    import time as _time
+    import signal as _signal
+    from orb_live.core.logger import get_logger
+    from orb_live.runner.session_runner import LateSessionStart
+    _log = get_logger(__name__)
+
+    _sleep_fn = _sleep or _time.sleep
+    shutdown   = _shutdown if _shutdown is not None else [False]
+
+    if _shutdown is None:
+        def _on_signal(signum, frame):
+            shutdown[0] = True
+        _signal.signal(_signal.SIGTERM, _on_signal)
+        _signal.signal(_signal.SIGINT,  _on_signal)
+
+    last_run_date = None
+
+    while not shutdown[0]:
+        next_pm = clock.next_premarket_start()
+        now     = clock.now_et()
+        secs    = (next_pm - now).total_seconds()
+
+        _log.info(
+            "daemon_loop_iter",
+            now=now.isoformat(),
+            next_premarket=next_pm.isoformat(),
+            wait_seconds=round(secs, 1),
+        )
+
+        # Guard: never re-run a session date we already completed. The EOD
+        # flatten now finishes the session ~1 min BEFORE the close, but
+        # next_market_day() keeps returning today until 16:00 ET — so without
+        # this the daemon would immediately restart the same session, re-run
+        # pre-market and re-enter trades. Idle until the clock rolls forward.
+        if next_pm.date() == last_run_date:
+            _log.info("daemon_session_already_ran", session_date=str(last_run_date))
+            _sleep_fn(min(_sleep_interval, 60.0))
+            continue
+
+        if secs > 1:
+            # The chunk cadence is a SHUTDOWN guarantee, not a logging one:
+            # SIGTERM is acted on within one chunk, so an overnight wait must
+            # keep sleeping in short hops. Only the log line is throttled.
+            # At 60s chunks this was ~840 identical lines across a weekend,
+            # which buries anything worth reading.
+            #
+            # Remaining time is re-derived from the clock every hop, never
+            # decremented. A counter drifts by exactly as much wall time as
+            # anything inside the loop blocks for -- on 2026-09-17 the
+            # heartbeat's failing reconnects drifted it ~26 minutes and the
+            # 08:30 session simply never started. A clock read also survives
+            # suspend, VM pause and NTP steps.
+            # Cadences (logging, heartbeat) count slept time; only the wait
+            # itself is clock-driven, which is what 09-17 got wrong.
+            since_log  = None         # None -> emit on the first hop
+            since_beat = 0.0
+            heartbeat  = getattr(runner, "broker_heartbeat", None)
+            budget     = secs         # floor: slept time, in case the clock stalls
+            while not shutdown[0]:
+                now = clock.now_et()
+                # Whichever says "time's up" first wins. The clock catches
+                # blocked time the budget cannot see (the 09-17 drift); the
+                # budget still ends the wait if the clock stops advancing.
+                remaining = min((next_pm - now).total_seconds(), budget)
+                if remaining <= 0:
+                    break
+
+                # Skip the probe close to the open: a reconnect storm blocks
+                # for minutes, and being late for pre-market is worse than
+                # starting the session on a socket it will check anyway.
+                if (heartbeat is not None
+                        and since_beat >= BROKER_HEARTBEAT_SECS
+                        and remaining > HEARTBEAT_QUIET_SECS):
+                    since_beat = 0.0
+                    try:
+                        heartbeat()
+                    except Exception as exc:
+                        _log.critical("daemon_heartbeat_failed", error=str(exc))
+                    now       = clock.now_et()
+                    remaining = min((next_pm - now).total_seconds(), budget)
+                    if remaining <= 0:
+                        break
+
+                chunk = min(_sleep_interval, remaining)
+                if since_log is None or since_log >= SLEEP_LOG_EVERY_SECS:
+                    _log.info(
+                        "daemon_loop_sleep",
+                        remaining_seconds=round(remaining, 1),
+                        next_premarket=next_pm.isoformat(),
+                        chunk_seconds=round(chunk, 1),
+                    )
+                    since_log = 0.0
+                _sleep_fn(chunk)
+                budget     -= chunk
+                since_log  += chunk
+                since_beat += chunk
+            if shutdown[0]:
+                break
+
+        if shutdown[0]:
+            break
+
+        session_date = next_pm.date()
+        _log.info("daemon_session_starting", session_date=str(session_date))
+        try:
+            if recover:
+                runner.recover(session_date)
+                recover = False
+            else:
+                runner.run_session(session_date)
+            last_run_date = session_date
+        except SystemExit:
+            break
+        except LateSessionStart as exc:
+            # The opposite of the ConnectionError case below: this day cannot
+            # be recovered, so mark it run and idle until the clock rolls
+            # forward. Retrying would re-raise every minute until 16:00.
+            _log.critical("daemon_session_skipped_late",
+                          session_date=str(session_date), error=str(exc))
+            last_run_date = session_date
+        except ConnectionError as exc:
+            # A socket drop escaped the session's in-place reconnect. Reconnect
+            # and let the loop re-run the SAME day (last_run_date not set, and
+            # next_market_day returns today until 16:00 ET) so trading resumes.
+            _log.critical("daemon_session_disconnect",
+                          session_date=str(session_date), error=str(exc))
+            if runner.reconnect_broker():
+                _log.warning("daemon_reconnected_resuming_day",
+                             session_date=str(session_date))
+                _sleep_fn(min(_sleep_interval, 5.0))
+            else:
+                _log.critical("daemon_reconnect_failed_retrying",
+                              session_date=str(session_date))
+                _sleep_fn(min(_sleep_interval, 60.0))
+
+
+def main() -> None:
+    # Load .env from the project root (no-op if file is absent).
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    # Configure logging and emit the very first log line BEFORE any other work.
+    # This makes startup hangs visible immediately in journald / stdout.
+    from orb_live.core.logger import configure_logging, get_logger
+    configure_logging()
+    _log = get_logger(__name__)
+
+    args = _parse_args()
+    _log.info("runner_starting", argv=sys.argv[1:])
+
+    if args.live:
+        _confirm_live()
+
+    runner, clock, health_server, session_date = _build_components(args, _log)
+
+    # Health server runs in a daemon thread — starts immediately so /health
+    # responds even while the daemon loop is sleeping before market open.
+    health_server.start()
+    _log.info("health_server_listening", port=8080)
+
+    try:
+        if args.session_date:
+            # One-shot: run the specified date immediately
+            if args.recover:
+                runner.recover(session_date)
+            else:
+                from orb_live.runner.session_runner import LateSessionStart
+                try:
+                    runner.run_session(session_date)
+                except LateSessionStart as exc:
+                    _log.critical("runner_refused_late_start", error=str(exc))
+                    print(f"{exc}\nUse --recover to resume a session started earlier today.")
+                    sys.exit(2)
+        else:
+            # Daemon mode: sleep until next 08:30 ET pre-market, then loop
+            _run_daemon(runner, clock, recover=args.recover)
+    finally:
+        health_server.stop()
+
+
+if __name__ == "__main__":
+    main()

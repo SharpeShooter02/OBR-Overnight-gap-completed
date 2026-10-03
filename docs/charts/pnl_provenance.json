@@ -1,0 +1,31 @@
+{
+  "kind": "aggregated historical simulation; no actual account records",
+  "run_at": "2026-09-29T17:13:55.769409-04:00",
+  "span": [
+    "2020-01-02",
+    "2026-09-28"
+  ],
+  "holdout_start": "2026-05-21",
+  "fixed_notional_per_unit_usd": 1000,
+  "compounding": false,
+  "pnl_usd": {
+    "full": 16071.07588274891,
+    "in_sample": 14985.145448527837,
+    "out_of_sample": 1085.9304342210733
+  },
+  "trades": {
+    "full": 1776,
+    "in_sample": 1601,
+    "out_of_sample": 175
+  },
+  "source_sha256": {
+    "freeze_run.json": "95415d0d988424f94cc8cfb363879cc7fd7936ca245aae42d4adba2d8668b655",
+    "freeze_sized.parquet": "53035366f179359c86121f3e11fe44d3e633a17c613daae43cd7857893ec2c5d"
+  },
+  "limitations": [
+    "Archived results, not a fresh numerical backtest",
+    "Underlying daily caches were stale near the end of this run",
+    "V48/V49 configuration changes postdate the split; date holdout is not untouched",
+    "Modelled fills and costs differ from live trading; see strategy specification"
+  ]
+}

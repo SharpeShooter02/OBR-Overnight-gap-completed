@@ -1,0 +1,43 @@
+{
+  "form": "bps = a + b * sqrt(clip(notional / V, max=part_max))",
+  "V": "median dollar volume per minute, 09:30-09:59 (known at 10:00)",
+  "entry": {
+    "a": 10.976909167439839,
+    "b": 25.314970339436517,
+    "path": "5-second trigger",
+    "fit_raw": [
+      17.524710549628672,
+      25.314970339436517,
+      -6.547801382188833
+    ]
+  },
+  "stop": {
+    "a": 3.442145809536361,
+    "b": 84.77159703765851
+  },
+  "part_max": 1.007582991630624,
+  "calibration": {
+    "n_entry": 71,
+    "n_stop": 23,
+    "median_notional": 2943.1,
+    "loo_entry": {
+      "model": 21.648603511481895,
+      "class_mean": 21.776946690430275,
+      "pooled_mean": 21.681147038441026
+    },
+    "loo_stop": {
+      "model": 12.606846549313719,
+      "class_mean": 20.308829380850838,
+      "pooled_mean": 18.376696855926173
+    },
+    "live_span": [
+      "2026-07-01",
+      "2026-09-14"
+    ],
+    "outages_excluded": [
+      "2026-08-18",
+      "2026-08-27"
+    ]
+  },
+  "default_notional": 2943.1
+}

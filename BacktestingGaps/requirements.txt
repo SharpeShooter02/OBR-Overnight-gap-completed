@@ -1,0 +1,28 @@
+# Pinned to the versions this repo's cached results were produced with
+# (system Python 3.13.3 as of 2026-08-18). Do not float these casually —
+# the parquet cache and 15 years of backtest results depend on them.
+
+pandas==2.3.0
+numpy==2.3.1
+pyarrow==24.0.0
+scipy==1.17.1
+matplotlib==3.10.9
+scikit-learn==1.8.0
+lightgbm==4.6.0
+statsmodels==0.14.6
+shap==0.51.0
+yfinance==0.2.59
+requests==2.34.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+
+# Test runner
+pytest==9.0.3
+
+# The strategy profile — single source of truth, owned by the live repo —
+# is installed separately, WITHOUT dependencies:
+#
+#     pip install -e ../orb-live-trading --no-deps
+#
+# --no-deps is deliberate: orb_live.strategy.v1_strategy needs only pandas,
+# so the research env does not pull in ib_async / boto3 / sqlalchemy.
