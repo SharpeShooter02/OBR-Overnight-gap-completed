@@ -95,5 +95,5 @@ generated outputs remain private by default. A full numerical reproduction
 requires the same inputs, data provenance and cutoff as the original run; this
 source-only release does not certify that reproduction.
 
-See [release notes](RELEASE_NOTES.md) and the
-[blog research checklist](BLOG_RESEARCH.md) before quoting performance.
+See [release notes](RELEASE_NOTES.md) and
+[validation limits](VALIDATION.md) before quoting performance.

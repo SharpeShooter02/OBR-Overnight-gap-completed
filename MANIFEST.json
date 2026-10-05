@@ -3,7 +3,6 @@
   "scope": "allowlisted source snapshot; no Git history or runtime records",
   "files": {
     ".gitignore": "5ea2bea67675991c8edf85f133664000085c8bc86fcf74879e96695758171de3",
-    "BLOG_RESEARCH.md": "15cb3b9339dc9805cb185d3e90bf6c4da19db24b4157a5e27eb5d3924df9939a",
     "BacktestingGaps/.env.example": "efdc62773e63d751c1fa50cc2bbecf7c1ca5f1f2cbab27b979a50c1333652ee4",
     "BacktestingGaps/.gitignore": "5ea2bea67675991c8edf85f133664000085c8bc86fcf74879e96695758171de3",
     "BacktestingGaps/README.md": "c9c2e7f9cd4b639943bdbf28eb474544874d23a0f0d459678b17cb13c9739a6c",
@@ -29,7 +28,7 @@
     "BacktestingGaps/scripts/skip_cheap_by_class.py": "c5ba6018c9bfce1812be3ef4ddd708a7c14fea9977d0ef4ab890fcce39dd7567",
     "BacktestingGaps/sigma_master.csv": "bf79ca3fd5be91ba7f73d6c5a3f7bab675914518ed46e0aa9e4ce62f3939f5b1",
     "BacktestingGaps/tests/test_sharpe_convention.py": "63e5bbf6993aba6f875ee9b60089615604e9d2530726168201e7fc1b070e1286",
-    "README.md": "cd80fcc01bbd81a78a2e0209adc67bf77b017e58b7287e97ecc8ba0c87ce76f3",
+    "README.md": "3ff8719d91c98aaf60155a3cb66a30324e9235244d7dad41539d9a554fcc0be6",
     "RELEASE_NOTES.md": "fb1cd35158ca793ba6749e950b03ec5cb13e2833c12d876b8c118ba7aea3bd20",
     "VALIDATION.md": "78375290a42b757b7460d0b02fb1ecb250725b7bfa973814001f502bde2cd335",
     "conftest.py": "0a94d27a0081c65684c2d58d57df6dee0f768b5480295a809c00a0dcdc50c8ae",
